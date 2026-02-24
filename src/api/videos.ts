@@ -7,6 +7,8 @@ import { getVideo, updateVideo } from "../db/videos";
 import { getAssetPath, mediaToExtension } from "./assets";
 import { randomBytes } from "crypto";
 import { uploadVideoToS3 } from "./s3";
+import { parseArgs } from "util";
+import { getPositionOfLineAndCharacter } from "typescript";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -48,13 +50,57 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const assetPath = getAssetPath(cfg, filename);
   await Bun.write(assetPath, data);
 
-  await uploadVideoToS3(cfg, filename, assetPath, mediaType);
+  const aspectRatio = await getVideoAspectRatio(assetPath);
+  const key = `${aspectRatio}/${filename}`;
 
-  videoData.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${filename}`;
+  await uploadVideoToS3(cfg, key, assetPath, mediaType);
+
+  videoData.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${key}`;
 
   await updateVideo(cfg.db, videoData);
 
   await Bun.file(assetPath).delete();
 
   return respondWithJSON(200, null);
+}
+
+async function getVideoAspectRatio(filePath: string){
+  const proc = Bun.spawn([
+    "ffprobe",
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
+    "-show_entries",
+    "stream=width,height",
+    "-of",
+    "json",
+    filePath
+  ], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const stdoutText = await new Response(proc.stdout).text();
+  const stderrText = await new Response(proc.stderr).text();
+
+  if(await proc.exited !== 0){
+    throw new Error(stderrText);
+  }
+
+  const data = JSON.parse(stdoutText);
+
+  const { width, height } = data.streams[0];
+
+  const aspectRatio = Math.floor(width/height);
+
+  switch(aspectRatio){
+    case 1:
+      return "landscape";
+    case 0:
+      return "portrait";
+    
+    default:
+      return "other";
+  }
 }

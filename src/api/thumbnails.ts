@@ -20,7 +20,7 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
 
   const videoData = await getVideo(cfg.db, videoId);
   if(!videoData) throw new NotFoundError("video not found");
-  if(videoData?.userID !== userID){
+  if(videoData.userID !== userID){
     throw new UserForbiddenError("User not authorized");
   }
 

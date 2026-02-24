@@ -7,8 +7,6 @@ import { getVideo, updateVideo } from "../db/videos";
 import { getAssetPath, mediaToExtension } from "./assets";
 import { randomBytes } from "crypto";
 import { uploadVideoToS3 } from "./s3";
-import { parseArgs } from "util";
-import { getPositionOfLineAndCharacter } from "typescript";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -52,8 +50,9 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   const aspectRatio = await getVideoAspectRatio(assetPath);
   const key = `${aspectRatio}/${filename}`;
-
-  await uploadVideoToS3(cfg, key, assetPath, mediaType);
+  
+  const processedVideo = await processVideoForFastStart(assetPath);
+  await uploadVideoToS3(cfg, key, processedVideo, mediaType);
 
   videoData.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${key}`;
 
@@ -64,31 +63,38 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   return respondWithJSON(200, null);
 }
 
-async function getVideoAspectRatio(filePath: string){
-  const proc = Bun.spawn([
-    "ffprobe",
-    "-v",
-    "error",
-    "-select_streams",
-    "v:0",
-    "-show_entries",
-    "stream=width,height",
-    "-of",
-    "json",
-    filePath
-  ], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+export async function getVideoAspectRatio(filePath: string){
+  const proc = Bun.spawn(
+    [
+      "ffprobe",
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      filePath
+    ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
 
   const stdoutText = await new Response(proc.stdout).text();
   const stderrText = await new Response(proc.stderr).text();
 
-  if(await proc.exited !== 0){
-    throw new Error(stderrText);
+  const exitCode = await proc.exited;
+  if(exitCode !== 0){
+    throw new Error(`ffprobe error: ${stderrText}`);
   }
 
   const data = JSON.parse(stdoutText);
+  if(!data.streams || data.streams.length === 0){
+    throw new Error("No video streams found");
+  }
 
   const { width, height } = data.streams[0];
 
@@ -103,4 +109,33 @@ async function getVideoAspectRatio(filePath: string){
     default:
       return "other";
   }
+}
+
+export async function processVideoForFastStart(inputFilePath: string) {
+  const outputPath = `${inputFilePath}.processed`;
+  const proc = Bun.spawn([
+    "ffmpeg",
+    "-i",
+    inputFilePath,
+    "-movflags",
+    "faststart",
+    "-map_metadata",
+    "0",
+    "-codec",
+    "copy",
+    "-f",
+    "mp4",
+    outputPath
+  ], {
+    stderr: "pipe"
+  });
+
+  const stderrText = await new Response(proc.stderr).text();
+
+  const exitCode = await proc.exited;
+  if(exitCode !== 0){
+    throw new Error(`ffmpeg error: ${stderrText}`);
+  }
+
+  return outputPath;
 }
